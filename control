@@ -1,0 +1,8 @@
+Package: com.yourname.coolapknoad
+Name: CoolapkNoAd
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 酷安去广告插件 — 拦截信息流广告、开屏广告、赞助广告
+Maintainer: You
+Author: You
+Section: Tweaks
