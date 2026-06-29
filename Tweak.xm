@@ -39,11 +39,6 @@ static id ReturnNil(__unused id self, __unused SEL _cmd, ...) {
     return nil;
 }
 
-// v2: 返回 @[] 的空实现
-static id ReturnEmptyArray(__unused id self, __unused SEL _cmd, ...) {
-    return @[];
-}
-
 // v3: 什么也不做的 void 实现
 static void DoNothing(__unused id self, __unused SEL _cmd, ...) {
 }
