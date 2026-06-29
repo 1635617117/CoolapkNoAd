@@ -246,7 +246,147 @@
 %end
 
 // ============================================================
-// 7. 拦截 FeedAdvertisementSponsorTypeInfo（赞助商类型广告）
+// 7. 拦截 Tanx（阿里 Tanx 广告系统）— 评论区广告的元凶
+// ============================================================
+
+%hook TanxGMCustomFeedLoader
+
+- (void)loadAd {
+    // 不加载 Tanx 广告
+    %log;
+}
+
+- (id)feedAdView {
+    return nil;
+}
+
+%end
+
+%hook TanxGMCustomFeedViewCreater
+
+- (id)createFeedAdViewWithFrame:(CGRect)frame {
+    return nil;
+}
+
+%end
+
+%hook TanxGMCustomInit
+
+- (instancetype)init {
+    return nil;
+}
+
+%end
+
+%hook TanxSDKManager
+
++ (void)startWithAppId:(id)appId {
+    // 不让 Tanx SDK 启动
+}
+
+%end
+
+%hook TanxGMCustomSplashLoader
+
+- (void)loadSplashAd {
+    // 不加载 Tanx 开屏
+}
+
+%end
+
+// ============================================================
+// 8. 拦截评论区广告事件处理器
+// ============================================================
+
+%hook EntityListFeedReplyEventProcessor
+
+- (void)processEvent:(id)event {
+    // 不处理广告相关事件
+    %log;
+}
+
+%end
+
+%hook EventSponsorPrizeCell
+
+- (void)didMoveToWindow {
+    [(UIView *)self setHidden:YES];
+    [(UIView *)self removeFromSuperview];
+}
+
+%end
+
+// ============================================================
+// 9. 兜底拦截：通用广告管理器和未分类 Loader
+// ============================================================
+
+%hook GeneralEntityListFeedAdvertisementManager
+
+- (void)loadAds {
+    // 不加载任何广告
+}
+
+- (NSArray *)ads {
+    return @[];
+}
+
+%end
+
+%hook EntityListFeedAdvertisementLoader_Unsupported
+
+- (void)loadFeedAdvertisement {
+    // 未知类型也不加载
+}
+
+%end
+
+%hook EntityListFeedTopEventProcessor
+
+- (void)processEvent:(id)event {
+    // 不处理置顶广告
+    %log;
+}
+
+%end
+
+%hook GMAdSDKManager
+
++ (void)startWithAppId:(id)appId {
+    // 不让 GM SDK 启动
+}
+
+%end
+
+// ============================================================
+// 10. 拦截 AnyThink 聚合 SDK
+// ============================================================
+
+%hook ABUAdSDKManager
+
++ (void)startWithCompletionBlock:(id)block {
+    // 不让聚合 SDK 启动
+}
+
+%end
+
+%hook ABUAdLoader
+
+- (void)loadAd {
+    // 不加载广告
+}
+
+%end
+
+%hook ABUNativeAdLoader
+
+- (void)loadAd {
+    // 不加载原生广告
+}
+
+%end
+
+// ============================================================
+// 11. 拦截 FeedAdvertisementSponsorTypeInfo（赞助商类型广告）
 // ============================================================
 
 %hook FeedAdvertisementSponsorTypeInfo
