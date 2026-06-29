@@ -26,18 +26,12 @@ jobs:
         run: |
           export THEOS=/opt/theos
           make clean
-          make package
+          make
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: CoolapkNoAd.dylib
-          path: .theos/obj/debug/CoolapkNoAd.dylib
+          path: |
+            .theos/obj/debug/CoolapkNoAd.dylib
           if-no-files-found: error
-
-      - name: Upload packaged deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: CoolapkNoAd.deb
-          path: packages/*.deb
-          if-no-files-found: ignore
