@@ -18,6 +18,7 @@ jobs:
 
       - name: Install Theos
         run: |
+          brew install ldid
           sudo mkdir -p /opt/theos
           sudo chown -R $USER /opt/theos
           git clone --recursive https://github.com/theos/theos.git /opt/theos
