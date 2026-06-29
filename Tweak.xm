@@ -1,226 +1,225 @@
 /*
- * Coolapk (CoolMarket) No-Ad Tweak v2.1
+ * Coolapk (CoolMarket) No-Ad Tweak v3.0
  * Target: CoolMarket.app v15.8.2
- * Strategy: Safe runtime swizzle + targeted method hooks
+ * Strategy: Network-level ad blocking via NSURLProtocol
  *
- * 安全原则：
- * - 每个方法用 imp_implementationWithBlock 精确匹配签名（避免泛型 C 函数 calling convention 问题）
- * - init 方法不返回 nil（避免空指针崩溃）
- * - 每个 swizzle 单独 try-catch
- * - 不 hook UIView（不影响全局）
+ * 方案说明：
+ * - 完全不依赖 ObjC/Swift 类名
+ * - 拦截广告 SDK 的网络请求（按域名/URL特征）
+ * - 开屏广告由定时扫描+移除处理
  */
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-#import <substrate.h>
 
 // ============================================================
-// 安全 swizzle 辅助函数
+// 广告域名黑名单
 // ============================================================
 
-static Class SafeClass(NSString *name) {
-    Class c = NSClassFromString(name);
-    if (!c) c = NSClassFromString([@"CoolMarket." stringByAppendingString:name]);
-    return c;
-}
+static NSString *adBlockDomains[] = {
+    // 穿山甲 / Pangle (ByteDance)
+    @"pangolin-sdk-toutiao.com",
+    @"i.snssdk.com",
+    @"pangle.com",
+    @"pangolin.snssdk.com",
+    @"dm.applog.snssdk.com",
+    @"sf3-fe-tos.pglstatp-toutiao.com",
+    @"is.snssdk.com",
 
-static void SafeSwizzle(Class cls, SEL sel, IMP newImp) {
-    if (!cls || !sel || !newImp) return;
-    @try {
-        Method m = class_getInstanceMethod(cls, sel);
-        if (m) {
-            method_setImplementation(m, newImp);
-            NSLog(@"🦐 Hooked %@.%@", NSStringFromClass(cls), NSStringFromSelector(sel));
+    // Tanx (Alibaba)
+    @"tanx.com",
+    @"tanx.cn",
+    @"etao.com",
+    @"tanx.alibaba.com",
+
+    // 腾讯 GDT / 优量汇
+    @"gdt.qq.com",
+    @"e.qq.com",
+    @"adnet.qq.com",
+    @"lu.qq.com",
+
+    // TopOn
+    @"toponad.com",
+    @"toponad-sdk.com",
+
+    // Inmobi
+    @"inmobi.com",
+    @"w.inmobi.com",
+
+    // Mintegral
+    @"mintegral.com",
+    @"sg.mintegral.com",
+
+    // 通用广告特征
+    @"adservice",
+    @"sdk.ad",
+    @"adx",
+    @"adsdk",
+};
+
+static const int adBlockDomainCount = sizeof(adBlockDomains) / sizeof(adBlockDomains[0]);
+
+// ============================================================
+// 广告 URL 路径特征
+// ============================================================
+
+static NSString *adBlockPathPrefixes[] = {
+    @"/ad/", @"/ads/", @"/splash/", @"/sdk/",
+    @"/feed/ad", @"/advert",
+};
+
+static const int adBlockPathCount = sizeof(adBlockPathPrefixes) / sizeof(adBlockPathPrefixes[0]);
+
+// ============================================================
+// 自定义 NSURLProtocol — 拦截广告请求
+// ============================================================
+
+@interface AdBlockProtocol : NSURLProtocol
+@end
+
+@implementation AdBlockProtocol
+
+// 判断是否应该拦截
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+    NSString *urlStr = request.URL.absoluteString.lowercaseString;
+    if (!urlStr) return NO;
+
+    // 检查域名黑名单
+    NSString *host = request.URL.host.lowercaseString;
+    if (host) {
+        for (int i = 0; i < adBlockDomainCount; i++) {
+            if ([host containsString:adBlockDomains[i]]) {
+                NSLog(@"🦐 Blocked ad request: %@", urlStr);
+                return YES;
+            }
         }
-    } @catch (NSException *e) {}
-}
+    }
 
-static void SafeClassSwizzle(Class cls, SEL sel, IMP newImp) {
-    if (!cls || !sel || !newImp) return;
-    @try {
-        Method m = class_getClassMethod(cls, sel);
-        if (m) {
-            method_setImplementation(m, newImp);
+    // 检查 URL 路径特征
+    NSString *path = request.URL.path.lowercaseString;
+    if (path) {
+        for (int i = 0; i < adBlockPathCount; i++) {
+            if ([path containsString:adBlockPathPrefixes[i]]) {
+                NSLog(@"🦐 Blocked ad request (path): %@", urlStr);
+                return YES;
+            }
         }
-    } @catch (NSException *e) {}
-}
-
-// 递归清理广告视图（前向声明供 %ctor 使用）
-static void cleanupSplashViews(UIView *view) {
-    if (!view) return;
-    NSString *vclass = NSStringFromClass([view class]);
-    if ([vclass containsString:@"Splash"] || [vclass containsString:@"GMCustomSplash"]) {
-        [view setHidden:YES];
-        [view removeFromSuperview];
     }
-    for (UIView *sv in view.subviews) {
-        cleanupSplashViews(sv);
-    }
+
+    return NO;
 }
 
-// ============================================================
-// %hook 编译时 hook（安全的 ObjC 类）
-// ============================================================
-
-%hook FeedAdvertisementManager
-- (void)requestAds:(id)request { }
-- (id)nextAdModel { return nil; }
-%end
-
-%hook FeedAdvertisementCellBaseV4
-- (CGFloat)cellHeight { return 0.0; }
-- (void)layoutSubviews {
-    %orig;
-    [(UIView *)self setHidden:YES];
-    [(UIView *)self setFrame:CGRectZero];
+// 返回自定义的请求（返回 nil 来阻止请求）
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+    return request;
 }
-- (void)setAdModel:(id)model {
-    [(UIView *)self setHidden:YES];
-    [(UIView *)self removeFromSuperview];
+
+// 开始加载 — 直接返回空数据，不发起实际请求
+- (void)startLoading {
+    id<NSURLProtocolClient> client = self.client;
+    NSURLResponse *response = [[NSURLResponse alloc] initWithURL:self.request.URL
+                                                        MIMEType:@"text/plain"
+                                           expectedContentLength:0
+                                                textEncodingName:nil];
+    [client URLProtocol:self didReceiveResponse:response cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+    [client URLProtocol:self didLoadData:[NSData data]];
+    [client URLProtocolDidFinishLoading:self];
 }
-%end
 
-%hook FeedAdvertisementSponsorTypeInfo
-+ (id)shared { return nil; }
-%end
+- (void)stopLoading {
+    // 啥也不做
+}
 
-%hook CSJAdSDKManager
-+ (void)setAppId:(id)appId { }
-%end
+@end
 
 // ============================================================
-// %ctor 运行时 swizzle
+// 构造函数
 // ============================================================
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"🦐 Coolapk No-Ad v2.1 loaded!");
+        NSLog(@"🦐 Coolapk No-Ad v3.0 loaded!");
 
-        // === 1. 信息流广告 Loaders ===
-        for (NSString *cn in @[
-            @"FeedAdvertisementLoader", @"FeedAdvertisementLoader_Official",
-            @"FeedAdvertisementLoader_Topon", @"FeedAdvertisementLoader_GMSelfDraw",
-            @"FeedAdLoader",
-            @"GeneralEntityListFeedAdvertisementLoader_Official",
-            @"GeneralEntityListFeedAdvertisementLoader_Topon",
-            @"GeneralEntityListFeedAdvertisementLoader_GMSelfDraw",
-            @"EntityListFeedAdvertisementLoader_Unsupported",
-        ]) {
-            Class cls = SafeClass(cn);
-            if (!cls) continue;
-            SafeSwizzle(cls, @selector(loadFeedAdvertisement),
-                imp_implementationWithBlock(^(id _self) {}));
-            SafeSwizzle(cls, @selector(loadAd),
-                imp_implementationWithBlock(^(id _self) {}));
-            SafeSwizzle(cls, @selector(loadAds),
-                imp_implementationWithBlock(^(id _self) {}));
-        }
+        // === 注册网络拦截器 ===
+        [NSURLProtocol registerClass:[AdBlockProtocol class]];
+        NSLog(@"🦐 AdBlockProtocol registered!");
 
-        // === 2. 广告管理器 ===
-        Class adMgr = SafeClass(@"FeedAdvertisementManager");
-        if (adMgr) {
-            SafeSwizzle(adMgr, @selector(loadAdWithCount:),
-                imp_implementationWithBlock(^(id _self, NSInteger c) {}));
-        }
-
-        Class genMgr = SafeClass(@"GeneralEntityListFeedAdvertisementManager");
-        if (genMgr) {
-            SafeSwizzle(genMgr, @selector(loadAds),
-                imp_implementationWithBlock(^(id _self) {}));
-        }
-
-        // === 3. 开屏广告 ===
-        for (NSString *cn in @[@"AdSplashManager", @"AdSplashModule",
-            @"CoolapkGMCustomSplashLoader", @"TanxGMCustomSplashLoader"]) {
-            Class cls = SafeClass(cn);
-            if (!cls) continue;
-            SafeSwizzle(cls, @selector(loadSplashAd),
-                imp_implementationWithBlock(^(id _self) {}));
-            SafeSwizzle(cls, @selector(showSplashAdInWindow:),
-                imp_implementationWithBlock(^(id _self, id w) {}));
-            SafeSwizzle(cls, @selector(startSplashRequest),
-                imp_implementationWithBlock(^(id _self) {}));
-            SafeSwizzle(cls, @selector(showSplashAd),
-                imp_implementationWithBlock(^(id _self) {}));
-        }
-
-        // === 4. Tanx 广告系统 ===
-        Class tanxLoader = SafeClass(@"TanxGMCustomFeedLoader");
-        if (tanxLoader) {
-            SafeSwizzle(tanxLoader, @selector(loadAd),
-                imp_implementationWithBlock(^(id _self) {}));
-        }
-        Class tanxMgr = SafeClass(@"TanxSDKManager");
-        if (tanxMgr) {
-            SafeClassSwizzle(tanxMgr, @selector(startWithAppId:),
-                imp_implementationWithBlock(^(id _self, id a) {}));
-        }
-
-        // === 5. GM 广告 ===
-        Class gmMgr = SafeClass(@"GMAdSDKManager");
-        if (gmMgr) {
-            SafeClassSwizzle(gmMgr, @selector(startWithAppId:),
-                imp_implementationWithBlock(^(id _self, id a) {}));
-        }
-        Class gmFeedView = SafeClass(@"CoolapkGMCustomFeedAdView");
-        if (gmFeedView) {
-            SafeSwizzle(gmFeedView, @selector(renderWithAdData:),
-                imp_implementationWithBlock(^(id _self, id d) {}));
-        }
-
-        // === 6. 评论区广告事件处理器 ===
-        for (NSString *cn in @[@"EntityListFeedReplyEventProcessor",
-            @"EntityListFeedTopEventProcessor", @"EntityListFeedEventProcessor",
-            @"EventSponsorPrizeCell",
-            @"EntityListEventLocalDataProcessor_AdminManagement",
-            @"EntityListRequestRemoteDataProcessor_SponsorCardProcess"]) {
-            Class cls = SafeClass(cn);
-            if (!cls) continue;
-            SafeSwizzle(cls, @selector(processEvent:),
-                imp_implementationWithBlock(^(id _self, id e) {}));
-        }
-
-        // === 7. AnyThink 聚合 SDK ===
-        for (NSString *cn in @[@"ABUAdSDKManager", @"ABUAdLoader",
-            @"ABUNativeAdLoader", @"ABUBannerAdLoader",
-            @"ABUSplashAdLoader", @"ABUDrawAdLoader"]) {
-            Class cls = SafeClass(cn);
-            if (!cls) continue;
-            SafeSwizzle(cls, @selector(loadAd),
-                imp_implementationWithBlock(^(id _self) {}));
-        }
-        Class abuMgr = SafeClass(@"ABUAdSDKManager");
-        if (abuMgr) {
-            SafeClassSwizzle(abuMgr, @selector(startWithCompletionBlock:),
-                imp_implementationWithBlock(^(id _self, id b) {}));
-        }
-
-        // === 8. FeedAdModel ===
-        Class adModel = SafeClass(@"FeedAdModel");
-        if (adModel) {
-            SafeSwizzle(adModel, @selector(initWithDictionary:),
-                imp_implementationWithBlock(^id(id _self, NSDictionary *d) {
-                    return nil;
-                }));
-        }
-
-        // === 9. FeedAdClick ===
-        Class adClick = SafeClass(@"FeedAdClick");
-        if (adClick) {
-            SafeSwizzle(adClick, @selector(handleClick),
-                imp_implementationWithBlock(^(id _self) {}));
-        }
-
-        // === 10. 启动后清理开屏残留 ===
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+        // === 启动后清理开屏广告 ===
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            @try {
-                for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                    cleanupSplashViews(window);
-                }
-            } @catch (NSException *e) {}
+            removeSplashWindows();
         });
 
-        NSLog(@"🦐 Coolapk No-Ad v2.1 init done!");
+        // === 定时扫描 + 移除广告视图（每3秒一次）===
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+            [NSThread sleepForTimeInterval:1.0];
+            while (true) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    removeAdViews();
+                });
+                [NSThread sleepForTimeInterval:3.0];
+            }
+        });
+    }
+}
+
+// 移除开屏窗口
+static void removeSplashWindows(void) {
+    @try {
+        for (UIWindow *window in [UIApplication sharedApplication].windows) {
+            NSString *cls = NSStringFromClass([window class]);
+            if ([cls containsString:@"Splash"] ||
+                [cls containsString:@"GMAd"] ||
+                [cls containsString:@"AdSplash"] ||
+                [cls containsString:@"TXAd"]) {
+                [window setHidden:YES];
+                [window setWindowLevel:UIWindowLevelNormal - 100];
+                [window removeFromSuperview];
+                NSLog(@"🦐 Removed splash window: %@", cls);
+            }
+        }
+    } @catch (NSException *e) {}
+}
+
+// 扫描视图层级，隐藏广告视图
+static void removeAdViews(void) {
+    @try {
+        UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
+        if (!keyWindow) return;
+        scanViewForAds(keyWindow, 0);
+    } @catch (NSException *e) {}
+}
+
+static void scanViewForAds(UIView *view, int depth) {
+    if (!view || depth > 20) return;
+
+    NSString *cls = NSStringFromClass([view class]);
+    BOOL isAdView = NO;
+
+    // 检查类名
+    if ([cls containsString:@"Splash"] ||
+        [cls containsString:@"FeedAd"] ||
+        [cls containsString:@"GMAd"] ||
+        [cls containsString:@"GMCustomFeed"] ||
+        [cls containsString:@"GMCustomSplash"] ||
+        [cls containsString:@"Sponsor"] ||
+        [cls containsString:@"TXAd"]) {
+        isAdView = YES;
+    }
+
+    // 检查是否展示广告图
+    if (!isAdView && [cls containsString:@"AdView"]) {
+        isAdView = YES;
+    }
+
+    if (isAdView) {
+        [view setHidden:YES];
+        [view removeFromSuperview];
+        NSLog(@"🦐 Removed ad view: %@", cls);
+        return;
+    }
+
+    for (UIView *sv in view.subviews) {
+        scanViewForAds(sv, depth + 1);
     }
 }
