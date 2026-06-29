@@ -1,7 +1,7 @@
 /*
- * Coolapk (CoolMarket) No-Ad Tweak v3.1
+ * Coolapk (CoolMarket) No-Ad Tweak v4.1
  * Strategy: NSURLProtocol network blocking + ad view placeholder removal
- * + Card-Secret verification (HMAC device-bound license)
+ * + Card-Secret verification via alert input (no Filza needed!)
  */
 
 #import <UIKit/UIKit.h>
@@ -11,12 +11,12 @@
 #import <sys/sysctl.h>
 
 // ============================================================
-// 🔐 Card-Secret 验证（需要 /var/mobile/Documents/.coocapk_license 文件）
+// 🔐 Card-Secret 验证（弹窗输入 + NSUserDefaults 持久化）
 // ============================================================
 
-#define LICENSE_FILE_PATH  @"/var/mobile/Documents/.coocapk_license"
 #define DEVICE_ID_FLAG     @"/var/mobile/Documents/.coocapk_dumpid"
 #define SECRET             @"C00lApkN0Ad-S3cr3t!2024"
+#define USERDEFAULTS_KEY   @"CoocapkNoAd_LicenseKey"
 
 static NSString *getDeviceId(void) {
     NSString *vendorId = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
@@ -52,32 +52,117 @@ static BOOL isValidLicenseKey(NSString *key) {
     NSString *devicePrefix = [clean substringToIndex:4];
     NSString *payload      = [clean substringWithRange:NSMakeRange(4, 8)];
     NSString *expectedSig  = [clean substringFromIndex:12];
-    // 设备绑定检查
     if (![devicePrefix isEqualToString:getDeviceIdPrefix()]) return NO;
-    // HMAC 签名验证
     NSString *message = [devicePrefix stringByAppendingString:payload];
     return [expectedSig.uppercaseString isEqualToString:hmacSha256(message).uppercaseString];
 }
 
-static NSString *readLicenseFile(void) {
-    if ([[NSFileManager defaultManager] fileExistsAtPath:LICENSE_FILE_PATH]) {
-        return [[NSString stringWithContentsOfFile:LICENSE_FILE_PATH
-                                         encoding:NSUTF8StringEncoding error:nil]
-                   stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    }
-    return nil;
+// ============================================================
+// Device ID 导出弹窗（替代 Filza 文件写入）
+// ============================================================
+
+static void showDeviceIdAlert(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 等待 App UI 就绪
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            NSString *prefix = getDeviceIdPrefix();
+            NSString *msg = [NSString stringWithFormat:
+                @"设备前缀: %@\n\n"
+                @"请将此4位前缀发给开发者获取卡密。\n\n"
+                @"收到卡密后，删除 .coocapk_dumpid 文件，\n"
+                @"然后重启 App 即可输入卡密。",
+                prefix];
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"🦐 Coolapk NoAd - 设备信息"
+                                 message:msg
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"复制前缀"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:^(UIAlertAction *action) {
+                [UIPasteboard generalPasteboard].string = prefix;
+            }]];
+            [alert addAction:[UIAlertAction actionWithTitle:@"关闭"
+                                                      style:UIAlertActionStyleCancel
+                                                    handler:nil]];
+            UIWindow *win = [UIApplication sharedApplication].keyWindow;
+            [win.rootViewController presentViewController:alert animated:YES completion:nil];
+        });
+    });
 }
 
-static void writeDeviceIdDump(void) {
-    NSString *content = [NSString stringWithFormat:
-        @"Device ID (full): %@\n"
-        @"Device ID (prefix 4 chars): %@\n\n"
-        @"Send the 4-char prefix above to get your license key.\n"
-        @"Then save the key to: %@\n"
-        @"Then delete this file and .coocapk_dumpid.\n",
-        getDeviceId(), getDeviceIdPrefix(), LICENSE_FILE_PATH];
-    [content writeToFile:@"/var/mobile/Documents/.coocapk_device_id.txt"
-              atomically:YES encoding:NSUTF8StringEncoding error:nil];
+// ============================================================
+// 卡密输入弹窗
+// ============================================================
+
+static BOOL g_licensePromptShown = NO;
+
+static void showLicenseInputAlert(void) {
+    if (g_licensePromptShown) return;
+    g_licensePromptShown = YES;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"🦐 Coolapk NoAd - 授权验证"
+                                 message:@"请输入卡密（复制后粘贴到输入框）"
+                          preferredStyle:UIAlertControllerStyleAlert];
+
+            [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+                tf.placeholder = @"XXXX-XXXX-XXXX-XXXX";
+                tf.keyboardType = UIKeyboardTypeASCIICapable;
+                tf.autocorrectionType = UITextAutocorrectionTypeNo;
+            }];
+
+            [alert addAction:[UIAlertAction actionWithTitle:@"验证"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:^(UIAlertAction *action) {
+                NSString *key = [alert.textFields.firstObject.text
+                                   stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (isValidLicenseKey(key)) {
+                    // 保存到 NSUserDefaults
+                    [[NSUserDefaults standardUserDefaults] setObject:key forKey:USERDEFAULTS_KEY];
+                    [[NSUserDefaults standardUserDefaults] synchronize];
+
+                    UIAlertController *ok = [UIAlertController
+                        alertControllerWithTitle:@"验证成功 ✅"
+                                         message:@"卡密有效！请重启 App 使广告拦截生效。"
+                                  preferredStyle:UIAlertControllerStyleAlert];
+                    [ok addAction:[UIAlertAction actionWithTitle:@"确定"
+                                                          style:UIAlertActionStyleDefault
+                                                        handler:nil]];
+                    UIWindow *win = [UIApplication sharedApplication].keyWindow;
+                    [win.rootViewController presentViewController:ok animated:YES completion:nil];
+                } else {
+                    g_licensePromptShown = NO; // 允许重新弹出
+                    UIAlertController *fail = [UIAlertController
+                        alertControllerWithTitle:@"验证失败 ❌"
+                                         message:@"卡密无效或不匹配此设备，请检查后重试。"
+                                  preferredStyle:UIAlertControllerStyleAlert];
+                    [fail addAction:[UIAlertAction actionWithTitle:@"重试"
+                                                            style:UIAlertActionStyleDefault
+                                                          handler:^(UIAlertAction *a) {
+                        showLicenseInputAlert();
+                    }]];
+                    [fail addAction:[UIAlertAction actionWithTitle:@"取消"
+                                                            style:UIAlertActionStyleCancel
+                                                          handler:nil]];
+                    UIWindow *win = [UIApplication sharedApplication].keyWindow;
+                    [win.rootViewController presentViewController:fail animated:YES completion:nil];
+                }
+            }]];
+
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消应用"
+                                                      style:UIAlertActionStyleDestructive
+                                                    handler:^(UIAlertAction *action) {
+                __builtin_trap();
+            }]];
+
+            UIWindow *win = [UIApplication sharedApplication].keyWindow;
+            [win.rootViewController presentViewController:alert animated:YES completion:nil];
+        });
+    });
 }
 
 // ============================================================
@@ -169,22 +254,26 @@ static BOOL isAdViewClass(NSString *cls);
 
 %ctor {
     @autoreleasepool {
-        // === 第一步：设备 ID 导出模式 ===
+        // === 第一步：设备 ID 导出模式（Filza 标记文件） ===
         if ([[NSFileManager defaultManager] fileExistsAtPath:DEVICE_ID_FLAG]) {
-            writeDeviceIdDump();
-            NSLog(@"🦐 Device ID dumped. Remove the flag file and re-inject.");
-            return; // 不继续执行广告拦截
+            showDeviceIdAlert();
+            NSLog(@"🦐 Device ID dump mode active");
+            return; // 不继续执行
         }
 
-        // === 第二步：卡密验证 ===
-        NSString *key = readLicenseFile();
-        if (!isValidLicenseKey(key)) {
-            NSLog(@"🦐 ❌ Invalid or missing license key! App will crash.");
-            // 延迟后闪退
+        // === 第二步：从 NSUserDefaults 读取已存储的卡密 ===
+        NSString *storedKey = [[NSUserDefaults standardUserDefaults] stringForKey:USERDEFAULTS_KEY];
+
+        if (storedKey && isValidLicenseKey(storedKey)) {
+            // 验证通过 → 启动广告拦截
+            NSLog(@"🦐 License verified! Device: %@", getDeviceIdPrefix());
+        } else if (storedKey) {
+            // 卡密存在但无效（设备更换或篡改）→ 闪退
+            NSLog(@"🦐 ❌ Invalid license key! Crashing...");
             dispatch_async(dispatch_get_main_queue(), ^{
                 UIAlertController *alert = [UIAlertController
-                    alertControllerWithTitle:@"🦐 Coolapk NoAd"
-                                     message:@"授权验证失败\n请检查卡密文件"
+                    alertControllerWithTitle:@"🦐 授权验证失败"
+                                     message:@"卡密无效或不匹配此设备。"
                               preferredStyle:UIAlertControllerStyleAlert];
                 UIWindow *win = [UIApplication sharedApplication].keyWindow;
                 [win.rootViewController presentViewController:alert animated:YES completion:^{
@@ -192,11 +281,16 @@ static BOOL isAdViewClass(NSString *cls);
                                    dispatch_get_main_queue(), ^{ __builtin_trap(); });
                 }];
             });
-            // 不要退出，等 crash 触发
+            return; // 等 crash
+        } else {
+            // 没有卡密 → 弹出输入框
+            NSLog(@"🦐 No license key found, showing input prompt");
+            showLicenseInputAlert();
+            return; // 不启动广告拦截，等用户输入后重启
         }
 
-        // === 第三步：启动广告拦截 ===
-        NSLog(@"🦐 Coolapk No-Ad v3.1 loaded! Device: %@", getDeviceIdPrefix());
+        // === 第三步：启动广告拦截（仅验证通过后执行） ===
+        NSLog(@"🦐 Coolapk No-Ad v4.1 loaded!");
 
         [NSURLProtocol registerClass:[AdBlockProtocol class]];
 
