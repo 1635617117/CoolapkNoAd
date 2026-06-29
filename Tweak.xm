@@ -144,6 +144,9 @@ static void AutoSwizzleAdClasses(void) {
 + (void)setAppId:(id)appId { }
 %end
 
+// 前向声明
+static void removeSplashViewsFromView(UIView *view);
+
 // ============================================================
 // 方案二/三/四：%ctor 运行时执行
 // ============================================================
