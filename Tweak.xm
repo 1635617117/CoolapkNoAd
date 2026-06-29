@@ -1,11 +1,83 @@
 /*
  * Coolapk (CoolMarket) No-Ad Tweak v3.1
  * Strategy: NSURLProtocol network blocking + ad view placeholder removal
+ * + Card-Secret verification (HMAC device-bound license)
  */
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <substrate.h>
+#import <CommonCrypto/CommonCrypto.h>
+
+// ============================================================
+// 🔐 Card-Secret 验证（需要 /var/mobile/Documents/.coocapk_license 文件）
+// ============================================================
+
+#define LICENSE_FILE_PATH  @"/var/mobile/Documents/.coocapk_license"
+#define DEVICE_ID_FLAG     @"/var/mobile/Documents/.coocapk_dumpid"
+#define SECRET             @"C00lApkN0Ad-S3cr3t!2024"
+
+static NSString *getDeviceId(void) {
+    NSString *vendorId = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
+    if (!vendorId) {
+        size_t size = 64;
+        char hw_uuid[64] = {0};
+        sysctlbyname("kern.uuid", hw_uuid, &size, NULL, 0);
+        vendorId = [NSString stringWithUTF8String:hw_uuid];
+    }
+    return [[vendorId stringByReplacingOccurrencesOfString:@"-" withString:@""] uppercaseString];
+}
+
+static NSString *getDeviceIdPrefix(void) {
+    NSString *deviceId = getDeviceId();
+    return (deviceId.length >= 4) ? [[deviceId substringToIndex:4] uppercaseString] : @"XXXX";
+}
+
+static NSString *hmacSha256(NSString *data) {
+    if (!data) return @"";
+    const char *cKey = [SECRET UTF8String];
+    const char *cData = [data UTF8String];
+    unsigned char hmac[CC_SHA256_DIGEST_LENGTH];
+    CCHmac(kCCHmacAlgSHA256, cKey, strlen(cKey), cData, strlen(cData), hmac);
+    return [NSString stringWithFormat:@"%02x%02x%02x%02x",
+        hmac[0], hmac[1], hmac[2], hmac[3]];
+}
+
+static BOOL isValidLicenseKey(NSString *key) {
+    if (!key || key.length < 8) return NO;
+    NSString *clean = [[key stringByReplacingOccurrencesOfString:@"-" withString:@""]
+                         stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (clean.length != 16) return NO;
+    NSString *devicePrefix = [clean substringToIndex:4];
+    NSString *payload      = [clean substringWithRange:NSMakeRange(4, 8)];
+    NSString *expectedSig  = [clean substringFromIndex:12];
+    // 设备绑定检查
+    if (![devicePrefix isEqualToString:getDeviceIdPrefix()]) return NO;
+    // HMAC 签名验证
+    NSString *message = [devicePrefix stringByAppendingString:payload];
+    return [expectedSig.uppercaseString isEqualToString:hmacSha256(message).uppercaseString];
+}
+
+static NSString *readLicenseFile(void) {
+    if ([[NSFileManager defaultManager] fileExistsAtPath:LICENSE_FILE_PATH]) {
+        return [[NSString stringWithContentsOfFile:LICENSE_FILE_PATH
+                                         encoding:NSUTF8StringEncoding error:nil]
+                   stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+    return nil;
+}
+
+static void writeDeviceIdDump(void) {
+    NSString *content = [NSString stringWithFormat:
+        @"Device ID (full): %@\n"
+        @"Device ID (prefix 4 chars): %@\n\n"
+        @"Send the 4-char prefix above to get your license key.\n"
+        @"Then save the key to: %@\n"
+        @"Then delete this file and .coocapk_dumpid.\n",
+        getDeviceId(), getDeviceIdPrefix(), LICENSE_FILE_PATH];
+    [content writeToFile:@"/var/mobile/Documents/.coocapk_device_id.txt"
+              atomically:YES encoding:NSUTF8StringEncoding error:nil];
+}
 
 // ============================================================
 // 广告域名黑名单
@@ -22,18 +94,16 @@ static NSString *adBlockDomains[] = {
     @"mintegral.com", @"sg.mintegral.com",
     @"adservice", @"sdk.ad", @"adx", @"adsdk",
 };
-
 static const int adBlockDomainCount = sizeof(adBlockDomains) / sizeof(adBlockDomains[0]);
 
 static NSString *adBlockPathPrefixes[] = {
     @"/ad/", @"/ads/", @"/splash/", @"/sdk/",
     @"/feed/ad", @"/advert",
 };
-
 static const int adBlockPathCount = sizeof(adBlockPathPrefixes) / sizeof(adBlockPathPrefixes[0]);
 
 // ============================================================
-// AdBlockProtocol
+// AdBlockProtocol (NSURLProtocol)
 // ============================================================
 
 @interface AdBlockProtocol : NSURLProtocol @end
@@ -59,7 +129,9 @@ static const int adBlockPathCount = sizeof(adBlockPathPrefixes) / sizeof(adBlock
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)r { return r; }
 - (void)startLoading {
     id c = self.client;
-    NSURLResponse *resp = [[NSURLResponse alloc] initWithURL:self.request.URL MIMEType:@"text/plain" expectedContentLength:0 textEncodingName:nil];
+    NSURLResponse *resp = [[NSURLResponse alloc] initWithURL:self.request.URL
+                                                   MIMEType:@"text/plain"
+                                      expectedContentLength:0 textEncodingName:nil];
     [c URLProtocol:self didReceiveResponse:resp cacheStoragePolicy:NSURLCacheStorageNotAllowed];
     [c URLProtocol:self didLoadData:[NSData data]];
     [c URLProtocolDidFinishLoading:self];
@@ -96,16 +168,40 @@ static BOOL isAdViewClass(NSString *cls);
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"🦐 Coolapk No-Ad v3.1 loaded!");
+        // === 第一步：设备 ID 导出模式 ===
+        if ([[NSFileManager defaultManager] fileExistsAtPath:DEVICE_ID_FLAG]) {
+            writeDeviceIdDump();
+            NSLog(@"🦐 Device ID dumped. Remove the flag file and re-inject.");
+            return; // 不继续执行广告拦截
+        }
 
-        // 注册网络拦截器
+        // === 第二步：卡密验证 ===
+        NSString *key = readLicenseFile();
+        if (!isValidLicenseKey(key)) {
+            NSLog(@"🦐 ❌ Invalid or missing license key! App will crash.");
+            // 延迟后闪退
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *alert = [UIAlertController
+                    alertControllerWithTitle:@"🦐 Coolapk NoAd"
+                                     message:@"授权验证失败\n请检查卡密文件"
+                              preferredStyle:UIAlertControllerStyleAlert];
+                UIWindow *win = [UIApplication sharedApplication].keyWindow;
+                [win.rootViewController presentViewController:alert animated:YES completion:^{
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{ __builtin_trap(); });
+                }];
+            });
+            // 不要退出，等 crash 触发
+        }
+
+        // === 第三步：启动广告拦截 ===
+        NSLog(@"🦐 Coolapk No-Ad v3.1 loaded! Device: %@", getDeviceIdPrefix());
+
         [NSURLProtocol registerClass:[AdBlockProtocol class]];
 
-        // 启动后移除开屏
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ removeSplashWindows(); });
 
-        // 定时清扫（更频繁：每1.5秒）
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
             [NSThread sleepForTimeInterval:1.0];
             while (true) {
@@ -119,31 +215,28 @@ static BOOL isAdViewClass(NSString *cls);
 }
 
 // ============================================================
-// 广告视图检测（严格模式 — 匹配更广）
+// 广告视图检测
 // ============================================================
 
 static BOOL isAdViewClass(NSString *cls) {
     if (!cls) return NO;
     NSString *lc = [cls lowercaseString];
-
-    // 精准匹配已知 CoolMarket 广告类
-    // 检查类名中是否包含广告关键词（不区分大小写）
     if ([lc containsString:@"feedadvertisement"]) return YES;
-    if ([lc containsString:@"feedad"]) return YES; // FeedAdLoader etc.
+    if ([lc containsString:@"feedad"]) return YES;
     if ([lc containsString:@"advertisement"]) return YES;
     if ([lc containsString:@"adsplash"]) return YES;
-    if ([lc containsString:@"gmcust"]) return YES;    // GMCustom*
-    if ([lc containsString:@"txad"]) return YES;     // Tanx TXAd*
-    if ([lc containsString:@"tanx"]) return YES;     // Tanx*
-    if ([lc containsString:@"abusplash"]) return YES; // ABU (AnyThink)
+    if ([lc containsString:@"gmcust"]) return YES;
+    if ([lc containsString:@"txad"]) return YES;
+    if ([lc containsString:@"tanx"]) return YES;
+    if ([lc containsString:@"abusplash"]) return YES;
     if ([lc containsString:@"abunative"]) return YES;
     if ([lc containsString:@"sponsorprize"]) return YES;
     if ([lc containsString:@"sponsorcard"]) return YES;
-    if ([lc containsString:@"gmadsdk"]) return YES;  // GMAdSDKManager
+    if ([lc containsString:@"gmadsdk"]) return YES;
     if ([lc containsString:@"adview"]) return YES;
-    if ([lc containsString:@"adload"]) return YES;   // AdLoader
-    if ([lc containsString:@"admodel"]) return YES;  // AdModel
-    if ([lc containsString:@"adclick"]) return YES;  // AdClick
+    if ([lc containsString:@"adload"]) return YES;
+    if ([lc containsString:@"admodel"]) return YES;
+    if ([lc containsString:@"adclick"]) return YES;
     return NO;
 }
 
