@@ -1,13 +1,13 @@
 /*
- * Coolapk (CoolMarket) No-Ad Tweak v2.0
+ * Coolapk (CoolMarket) No-Ad Tweak v2.1
  * Target: CoolMarket.app v15.8.2
- * Strategy: Runtime swizzle + generic ad view filter
+ * Strategy: Safe runtime swizzle + targeted method hooks
  *
- * 方案说明：
- * - 方案一：%hook 编译时 hook（只对纯 ObjC 类生效）
- * - 方案二：运行时 swizzle（处理 Swift 类名带模块前缀的问题）
- * - 方案三：UIView 广告检测器（兜底，按类名关键词隐藏广告视图）
- * - 方案四：启动后移除开屏广告窗口
+ * 安全原则：
+ * - 每个方法用 imp_implementationWithBlock 精确匹配签名（避免泛型 C 函数 calling convention 问题）
+ * - init 方法不返回 nil（避免空指针崩溃）
+ * - 每个 swizzle 单独 try-catch
+ * - 不 hook UIView（不影响全局）
  */
 
 #import <UIKit/UIKit.h>
@@ -15,97 +15,51 @@
 #import <substrate.h>
 
 // ============================================================
-// 工具函数：运行时 swizzle
+// 安全 swizzle 辅助函数
 // ============================================================
 
-// 带 fallback 的类查找：尝试纯名、CoolMarket.前缀
-static Class FindAdClass(NSString *name) {
-    Class cls = NSClassFromString(name);
-    if (cls) {
-        NSLog(@"🦐 Found class: %@", name);
-        return cls;
-    }
-    NSString *qualified = [@"CoolMarket." stringByAppendingString:name];
-    cls = NSClassFromString(qualified);
-    if (cls) {
-        NSLog(@"🦐 Found class (prefixed): %@", qualified);
-        return cls;
-    }
-    return nil;
+static Class SafeClass(NSString *name) {
+    Class c = NSClassFromString(name);
+    if (!c) c = NSClassFromString([@"CoolMarket." stringByAppendingString:name]);
+    return c;
 }
 
-// v1: 返回 nil 的空实现
-static id ReturnNil(__unused id self, __unused SEL _cmd, ...) {
-    return nil;
+static void SafeSwizzle(Class cls, SEL sel, IMP newImp) {
+    if (!cls || !sel || !newImp) return;
+    @try {
+        Method m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            method_setImplementation(m, newImp);
+            NSLog(@"🦐 Hooked %@.%@", NSStringFromClass(cls), NSStringFromSelector(sel));
+        }
+    } @catch (NSException *e) {}
 }
 
-// v3: 什么也不做的 void 实现
-static void DoNothing(__unused id self, __unused SEL _cmd, ...) {
+static void SafeClassSwizzle(Class cls, SEL sel, IMP newImp) {
+    if (!cls || !sel || !newImp) return;
+    @try {
+        Method m = class_getClassMethod(cls, sel);
+        if (m) {
+            method_setImplementation(m, newImp);
+        }
+    } @catch (NSException *e) {}
 }
 
-// 尝试从类名判断是否是广告视图
-static BOOL IsAdClassName(NSString *className) {
-    if (!className) return NO;
-    NSArray *keywords = @[
-        @"Splash", @"Ad", @"ad", @"Sponsor", @"sponsor",
-        @"FeedAd", @"Advertisement", @"GMCustomFeed", @"GMCustomSplash",
-        @"Tanx", @"GMFeedAd"
-    ];
-    for (NSString *kw in keywords) {
-        if ([className containsString:kw]) return YES;
-    }
-    return NO;
-}
-
-// 递归查找并移除开屏相关视图
-static void removeSplashViewsFromView(UIView *view) {
+// 递归清理广告视图（前向声明供 %ctor 使用）
+static void cleanupSplashViews(UIView *view) {
+    if (!view) return;
     NSString *vclass = NSStringFromClass([view class]);
-    if ([vclass containsString:@"Splash"] ||
-        [vclass containsString:@"GMAd"] ||
-        [vclass containsString:@"AdContainer"]) {
+    if ([vclass containsString:@"Splash"] || [vclass containsString:@"GMCustomSplash"]) {
         [view setHidden:YES];
         [view removeFromSuperview];
-        NSLog(@"🦐 Removed splash view: %@", vclass);
-        return;
     }
-    for (UIView *subview in view.subviews) {
-        removeSplashViewsFromView(subview);
+    for (UIView *sv in view.subviews) {
+        cleanupSplashViews(sv);
     }
-}
-
-// 遍历运行时所有类，自动寻找并 swizzle
-static void AutoSwizzleAdClasses(void) {
-    int classCount = objc_getClassList(NULL, 0);
-    Class *classes = (Class *)malloc(sizeof(Class) * classCount);
-    objc_getClassList(classes, classCount);
-
-    for (int i = 0; i < classCount; i++) {
-        NSString *name = NSStringFromClass(classes[i]);
-        if (!name) continue;
-
-        if ([name hasPrefix:@"CoolMarket."] && IsAdClassName(name)) {
-            NSLog(@"🦐 Auto-found: %@", name);
-
-            SEL loadSels[] = {
-                @selector(loadAd), @selector(loadAds),
-                @selector(loadSplashAd), @selector(loadFeedAdvertisement),
-                @selector(start), @selector(startWithCompletionBlock:),
-                @selector(initWithFrame:), @selector(initWithCoder:)
-            };
-
-            for (int j = 0; j < sizeof(loadSels)/sizeof(SEL); j++) {
-                Method m = class_getInstanceMethod(classes[i], loadSels[j]);
-                if (m) {
-                    method_setImplementation(m, (IMP)DoNothing);
-                }
-            }
-        }
-    }
-    free(classes);
 }
 
 // ============================================================
-// 方案一：%hook 编译时 hook（仅对纯 ObjC 类有效）
+// %hook 编译时 hook（安全的 ObjC 类）
 // ============================================================
 
 %hook FeedAdvertisementManager
@@ -114,9 +68,15 @@ static void AutoSwizzleAdClasses(void) {
 %end
 
 %hook FeedAdvertisementCellBaseV4
+- (CGFloat)cellHeight { return 0.0; }
 - (void)layoutSubviews {
+    %orig;
     [(UIView *)self setHidden:YES];
     [(UIView *)self setFrame:CGRectZero];
+}
+- (void)setAdModel:(id)model {
+    [(UIView *)self setHidden:YES];
+    [(UIView *)self removeFromSuperview];
 }
 %end
 
@@ -129,153 +89,138 @@ static void AutoSwizzleAdClasses(void) {
 %end
 
 // ============================================================
-// 方案二/三/四：%ctor 运行时执行
+// %ctor 运行时 swizzle
 // ============================================================
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"🦐 Coolapk No-Ad v2.0 loaded!");
+        NSLog(@"🦐 Coolapk No-Ad v2.1 loaded!");
 
-        // === 1. 精确查找已知广告类 ===
-        NSArray *adClassesToKill = @[
-            @"FeedAdvertisementManager",
-            @"FeedAdvertisementLoadTask",
-            @"FeedAdvertisementLoader",
-            @"FeedAdvertisementLoader_Official",
-            @"FeedAdvertisementLoader_Topon",
-            @"FeedAdvertisementLoader_GMSelfDraw",
+        // === 1. 信息流广告 Loaders ===
+        for (NSString *cn in @[
+            @"FeedAdvertisementLoader", @"FeedAdvertisementLoader_Official",
+            @"FeedAdvertisementLoader_Topon", @"FeedAdvertisementLoader_GMSelfDraw",
             @"FeedAdLoader",
-            @"FeedAdModel",
-            @"FeedAdClick",
-            @"FeedAdvertisementSponsorTypeInfo",
-
-            // 开屏广告
-            @"AdSplashManager",
-            @"AdSplashModule",
-            @"CoolapkGMCustomSplashLoader",
-            @"CoolapkGMSplashView",
-            @"TanxGMCustomSplashLoader",
-
-            // GM 广告
-            @"CoolapkGMCustomFeedLoader",
-            @"CoolapkGMCustomFeedAdView",
-            @"GMAdSDKManager",
-            @"GeneralEntityListFeedAdvertisementManager",
             @"GeneralEntityListFeedAdvertisementLoader_Official",
             @"GeneralEntityListFeedAdvertisementLoader_Topon",
             @"GeneralEntityListFeedAdvertisementLoader_GMSelfDraw",
             @"EntityListFeedAdvertisementLoader_Unsupported",
+        ]) {
+            Class cls = SafeClass(cn);
+            if (!cls) continue;
+            SafeSwizzle(cls, @selector(loadFeedAdvertisement),
+                imp_implementationWithBlock(^(id _self) {}));
+            SafeSwizzle(cls, @selector(loadAd),
+                imp_implementationWithBlock(^(id _self) {}));
+            SafeSwizzle(cls, @selector(loadAds),
+                imp_implementationWithBlock(^(id _self) {}));
+        }
 
-            // Tanx 广告
-            @"TanxGMCustomFeedLoader",
-            @"TanxGMCustomFeedViewCreater",
-            @"TanxGMCustomInit",
-            @"TanxSDKManager",
+        // === 2. 广告管理器 ===
+        Class adMgr = SafeClass(@"FeedAdvertisementManager");
+        if (adMgr) {
+            SafeSwizzle(adMgr, @selector(loadAdWithCount:),
+                imp_implementationWithBlock(^(id _self, NSInteger c) {}));
+        }
 
-            // 评论区/事件处理
-            @"EntityListFeedReplyEventProcessor",
-            @"EntityListFeedTopEventProcessor",
-            @"EntityListFeedEventProcessor",
+        Class genMgr = SafeClass(@"GeneralEntityListFeedAdvertisementManager");
+        if (genMgr) {
+            SafeSwizzle(genMgr, @selector(loadAds),
+                imp_implementationWithBlock(^(id _self) {}));
+        }
+
+        // === 3. 开屏广告 ===
+        for (NSString *cn in @[@"AdSplashManager", @"AdSplashModule",
+            @"CoolapkGMCustomSplashLoader", @"TanxGMCustomSplashLoader"]) {
+            Class cls = SafeClass(cn);
+            if (!cls) continue;
+            SafeSwizzle(cls, @selector(loadSplashAd),
+                imp_implementationWithBlock(^(id _self) {}));
+            SafeSwizzle(cls, @selector(showSplashAdInWindow:),
+                imp_implementationWithBlock(^(id _self, id w) {}));
+            SafeSwizzle(cls, @selector(startSplashRequest),
+                imp_implementationWithBlock(^(id _self) {}));
+            SafeSwizzle(cls, @selector(showSplashAd),
+                imp_implementationWithBlock(^(id _self) {}));
+        }
+
+        // === 4. Tanx 广告系统 ===
+        Class tanxLoader = SafeClass(@"TanxGMCustomFeedLoader");
+        if (tanxLoader) {
+            SafeSwizzle(tanxLoader, @selector(loadAd),
+                imp_implementationWithBlock(^(id _self) {}));
+        }
+        Class tanxMgr = SafeClass(@"TanxSDKManager");
+        if (tanxMgr) {
+            SafeClassSwizzle(tanxMgr, @selector(startWithAppId:),
+                imp_implementationWithBlock(^(id _self, id a) {}));
+        }
+
+        // === 5. GM 广告 ===
+        Class gmMgr = SafeClass(@"GMAdSDKManager");
+        if (gmMgr) {
+            SafeClassSwizzle(gmMgr, @selector(startWithAppId:),
+                imp_implementationWithBlock(^(id _self, id a) {}));
+        }
+        Class gmFeedView = SafeClass(@"CoolapkGMCustomFeedAdView");
+        if (gmFeedView) {
+            SafeSwizzle(gmFeedView, @selector(renderWithAdData:),
+                imp_implementationWithBlock(^(id _self, id d) {}));
+        }
+
+        // === 6. 评论区广告事件处理器 ===
+        for (NSString *cn in @[@"EntityListFeedReplyEventProcessor",
+            @"EntityListFeedTopEventProcessor", @"EntityListFeedEventProcessor",
             @"EventSponsorPrizeCell",
             @"EntityListEventLocalDataProcessor_AdminManagement",
-            @"EntityListRequestRemoteDataProcessor_SponsorCardProcess",
-
-            // AnyThink 聚合
-            @"ABUAdSDKManager",
-            @"ABUAdLoader",
-            @"ABUNativeAdLoader",
-            @"ABUBannerAdLoader",
-            @"ABUSplashAdLoader",
-            @"ABUDrawAdLoader",
-        ];
-
-        for (NSString *name in adClassesToKill) {
-            Class cls = FindAdClass(name);
+            @"EntityListRequestRemoteDataProcessor_SponsorCardProcess"]) {
+            Class cls = SafeClass(cn);
             if (!cls) continue;
-
-            // 获取该类所有方法
-            unsigned int mc = 0;
-            Method *methods = class_copyMethodList(cls, &mc);
-            for (unsigned int j = 0; j < mc; j++) {
-                SEL sel = method_getName(methods[j]);
-                NSString *selName = NSStringFromSelector(sel);
-                const char *type = method_getTypeEncoding(methods[j]);
-
-                if ([selName hasPrefix:@"init"] || [selName hasPrefix:@"shared"]) {
-                    if (type && type[0] == '@') {
-                        method_setImplementation(methods[j], (IMP)ReturnNil);
-                    }
-                }
-                else if ([selName containsString:@"load"] ||
-                         [selName containsString:@"start"] ||
-                         [selName containsString:@"request"] ||
-                         [selName containsString:@"setAppId"] ||
-                         [selName containsString:@"show"] ||
-                         [selName containsString:@"render"] ||
-                         [selName containsString:@"process"]) {
-                    method_setImplementation(methods[j], (IMP)DoNothing);
-                }
-                else if ([selName containsString:@"Ad"] ||
-                         [selName containsString:@"ad"] ||
-                         [selName containsString:@"model"] ||
-                         [selName containsString:@"Model"]) {
-                    if (type && type[0] == '@') {
-                        method_setImplementation(methods[j], (IMP)ReturnNil);
-                    }
-                }
-            }
-            free(methods);
-
-            // 也处理类方法
-            Class meta = object_getClass(cls);
-            unsigned int cmc = 0;
-            Method *cmethods = class_copyMethodList(meta, &cmc);
-            for (unsigned int j = 0; j < cmc; j++) {
-                SEL sel = method_getName(cmethods[j]);
-                NSString *selName = NSStringFromSelector(sel);
-                const char *type = method_getTypeEncoding(cmethods[j]);
-
-                if ([selName hasPrefix:@"shared"] || [selName hasPrefix:@"start"] ||
-                    [selName containsString:@"init"] || [selName containsString:@"load"]) {
-                    if (type && type[0] == '@') {
-                        method_setImplementation(cmethods[j], (IMP)ReturnNil);
-                    } else {
-                        method_setImplementation(cmethods[j], (IMP)DoNothing);
-                    }
-                }
-            }
-            free(cmethods);
+            SafeSwizzle(cls, @selector(processEvent:),
+                imp_implementationWithBlock(^(id _self, id e) {}));
         }
 
-        // === 2. 自动扫描发现漏网之鱼 ===
-        AutoSwizzleAdClasses();
-
-        // === 3. 拦截 UIView 广告检测器 ===
-        static IMP orig_didMoveToWindow = NULL;
-        IMP new_didMoveToWindow = imp_implementationWithBlock(^(UIView *view) {
-            if (orig_didMoveToWindow) {
-                ((void(*)(id, SEL))orig_didMoveToWindow)(view, @selector(didMoveToWindow));
-            }
-            NSString *vclass = NSStringFromClass([view class]);
-            if (IsAdClassName(vclass)) {
-                [view setHidden:YES];
-                [view removeFromSuperview];
-            }
-        });
-
-        Method dmwMethod = class_getInstanceMethod([UIView class], @selector(didMoveToWindow));
-        if (dmwMethod) {
-            orig_didMoveToWindow = method_setImplementation(dmwMethod, new_didMoveToWindow);
-            NSLog(@"🦐 Installed UIView ad filter");
+        // === 7. AnyThink 聚合 SDK ===
+        for (NSString *cn in @[@"ABUAdSDKManager", @"ABUAdLoader",
+            @"ABUNativeAdLoader", @"ABUBannerAdLoader",
+            @"ABUSplashAdLoader", @"ABUDrawAdLoader"]) {
+            Class cls = SafeClass(cn);
+            if (!cls) continue;
+            SafeSwizzle(cls, @selector(loadAd),
+                imp_implementationWithBlock(^(id _self) {}));
+        }
+        Class abuMgr = SafeClass(@"ABUAdSDKManager");
+        if (abuMgr) {
+            SafeClassSwizzle(abuMgr, @selector(startWithCompletionBlock:),
+                imp_implementationWithBlock(^(id _self, id b) {}));
         }
 
-        // === 4. 启动后延迟移除开屏 ===
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+        // === 8. FeedAdModel ===
+        Class adModel = SafeClass(@"FeedAdModel");
+        if (adModel) {
+            SafeSwizzle(adModel, @selector(initWithDictionary:),
+                imp_implementationWithBlock(^id(id _self, NSDictionary *d) {
+                    return nil;
+                }));
+        }
+
+        // === 9. FeedAdClick ===
+        Class adClick = SafeClass(@"FeedAdClick");
+        if (adClick) {
+            SafeSwizzle(adClick, @selector(handleClick),
+                imp_implementationWithBlock(^(id _self) {}));
+        }
+
+        // === 10. 启动后清理开屏残留 ===
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
-            for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                removeSplashViewsFromView(window);
-            }
-            NSLog(@"🦐 Post-launch splash cleanup done");
+            @try {
+                for (UIWindow *window in [UIApplication sharedApplication].windows) {
+                    cleanupSplashViews(window);
+                }
+            } @catch (NSException *e) {}
         });
+
+        NSLog(@"🦐 Coolapk No-Ad v2.1 init done!");
     }
 }
