@@ -1,0 +1,43 @@
+name: Build CoolapkNoAd dylib
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Tweak.xm'
+      - 'Makefile'
+      - 'control'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          sudo mkdir -p /opt/theos
+          sudo chown -R $USER /opt/theos
+          git clone --recursive https://github.com/theos/theos.git /opt/theos
+
+      - name: Build
+        run: |
+          export THEOS=/opt/theos
+          make clean
+          make package
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoolapkNoAd.dylib
+          path: .theos/obj/debug/CoolapkNoAd.dylib
+          if-no-files-found: error
+
+      - name: Upload packaged deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoolapkNoAd.deb
+          path: packages/*.deb
+          if-no-files-found: ignore
