@@ -94,14 +94,14 @@
 
 - (void)layoutSubviews {
     // 啥也不画
-    self.hidden = YES;
-    self.frame = CGRectZero;
+    [(UIView *)self setHidden:YES];
+    [(UIView *)self setFrame:CGRectZero];
 }
 
 - (void)setAdModel:(id)model {
     // 不设置广告数据
-    self.hidden = YES;
-    [self removeFromSuperview];
+    [(UIView *)self setHidden:YES];
+    [(UIView *)self removeFromSuperview];
 }
 
 %end
@@ -214,7 +214,7 @@
 
 - (void)renderWithAdData:(id)data {
     // 不渲染任何广告数据
-    self.hidden = YES;
+    [(UIView *)self setHidden:YES];
 }
 
 %end
