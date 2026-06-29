@@ -136,6 +136,11 @@ static const int adBlockPathCount = sizeof(adBlockPathPrefixes) / sizeof(adBlock
 // 构造函数
 // ============================================================
 
+// 前向声明
+static void removeSplashWindows(void);
+static void removeAdViews(void);
+static void scanViewForAds(UIView *view, int depth);
+
 %ctor {
     @autoreleasepool {
         NSLog(@"🦐 Coolapk No-Ad v3.0 loaded!");
