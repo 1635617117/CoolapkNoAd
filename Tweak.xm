@@ -31,7 +31,7 @@
     %log;
 }
 
-@end
+%end
 
 %hook FeedAdvertisementLoadTask
 
@@ -44,7 +44,7 @@
     %log;
 }
 
-@end
+%end
 
 %hook FeedAdvertisementLoader
 
@@ -57,25 +57,25 @@
     return nil;
 }
 
-@end
+%end
 
 %hook FeedAdvertisementLoader_Official
 - (void)loadFeedAdvertisement {
     // 官方渠道也不加载
 }
-@end
+%end
 
 %hook FeedAdvertisementLoader_Topon
 - (void)loadFeedAdvertisement {
     // TopOn聚合渠道不加载
 }
-@end
+%end
 
 %hook FeedAdvertisementLoader_GMSelfDraw
 - (void)loadFeedAdvertisement {
     // GM自渲染不加载
 }
-@end
+%end
 
 // ============================================================
 // 2. 拦截信息流广告 Cell 展示
@@ -104,7 +104,7 @@
     [self removeFromSuperview];
 }
 
-@end
+%end
 
 %hook FeedAdModel
 
@@ -117,7 +117,7 @@
     return nil;
 }
 
-@end
+%end
 
 // ============================================================
 // 3. 拦截开屏广告
@@ -139,7 +139,7 @@
     // 不发起请求
 }
 
-@end
+%end
 
 %hook CoolapkGMCustomSplashLoader
 
@@ -152,7 +152,7 @@
     // 不展示
 }
 
-@end
+%end
 
 %hook CoolapkGMSplashView
 
@@ -164,7 +164,7 @@
     // 不展示
 }
 
-@end
+%end
 
 %hook AdSplashModule
 
@@ -172,7 +172,7 @@
     // 不展示
 }
 
-@end
+%end
 
 // ============================================================
 // 4. 拦截广告 SDK 初始化（可选，建议先试上面）
@@ -187,7 +187,7 @@
 //     // 不让 SDK 启动
 // }
 
-@end
+%end
 
 // ============================================================
 // 5. 拦截 GM（Gromore）自定义 Feed 广告
@@ -204,7 +204,7 @@
     return nil;
 }
 
-@end
+%end
 
 %hook CoolapkGMCustomFeedAdView
 
@@ -217,7 +217,7 @@
     self.hidden = YES;
 }
 
-@end
+%end
 
 // ============================================================
 // 6. 拦截 Feed Proportion / Sponsor 广告
@@ -234,7 +234,7 @@
     return nil;
 }
 
-@end
+%end
 
 %hook FeedAdClick
 
@@ -243,7 +243,7 @@
     %log;
 }
 
-@end
+%end
 
 // ============================================================
 // 7. 拦截 FeedAdvertisementSponsorTypeInfo（赞助商类型广告）
@@ -259,7 +259,7 @@
     return nil;
 }
 
-@end
+%end
 
 // ============================================================
 // 8. 构造函数拦截器
