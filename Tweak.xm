@@ -8,6 +8,7 @@
 #import <objc/runtime.h>
 #import <substrate.h>
 #import <CommonCrypto/CommonCrypto.h>
+#import <sys/sysctl.h>
 
 // ============================================================
 // 🔐 Card-Secret 验证（需要 /var/mobile/Documents/.coocapk_license 文件）
