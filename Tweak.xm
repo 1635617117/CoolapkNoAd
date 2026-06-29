@@ -217,6 +217,7 @@ static void AutoSwizzleAdClasses(void) {
             IMP impNil = (IMP)ReturnNil;
             IMP impVoid = (IMP)DoNothing;
             IMP impEmptyArray = (IMP)ReturnEmptyArray;
+            (void)impEmptyArray; // 保留备用
             
             // 获取该类所有方法
             unsigned int mc = 0;
@@ -312,7 +313,7 @@ static void AutoSwizzleAdClasses(void) {
                        dispatch_get_main_queue(), ^{
             // 遍历所有 window，查找并移除开屏视图
             for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                [self removeSplashViewsFromView:window];
+                removeSplashViewsFromView(window);
             }
             NSLog(@"🦐 Post-launch splash cleanup done");
         });
